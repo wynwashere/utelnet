@@ -132,7 +132,7 @@ func sendDiscordWebhookWithFileGeneric(title string, color int, host, username, 
 	}
 	payloadStruct := DiscordWebhook{
 		Username:  "Telnet Scanner",
-		AvatarURL: "https://i.imgur.com/DIvu3F0.png",
+		AvatarURL: "https://media.tenor.com/pdX9YTI4_eoAAAAM/cat-cat-with-tongue.gif",
 		Embeds:    []DiscordEmbed{embed},
 	}
 	jsonPayload, _ := json.Marshal(payloadStruct)
